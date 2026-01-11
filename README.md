@@ -8,7 +8,7 @@
 
 This repository contains the official implementation of the **Spirit-v1.5 VLA model**, as well as the runtime wrapper required to reproduce our results on the RoboChallenge benchmark. 
 ![image](assets/rc_results.png)
-As of Jan 11, 2026, Spirit-v1.5 ranks **#1** on the RoboChallenge Table30 benchmark.
+As of Jan 11, 2026, Spirit-v1.5 ranks **#1** on the [RoboChallenge](https://robochallenge.cn/home) Table30 benchmark.
 
 ## 📰 News
 * **[2026-01]** Initial Release: Technical blog, inference code, base model checkpoint, and a fine-tuned checkpoint are now available.
