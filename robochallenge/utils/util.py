@@ -9,18 +9,22 @@
 # - Adjusted imports to use our package layout (relative import). Logic unchanged.
 # ==============================================================================
 
-import threading
 import functools
+import threading
 import time
 from datetime import datetime
-from .enums import ReturnCode
+
 import requests
+
+from .enums import ReturnCode
+
 
 def timeout(seconds):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             result = [Exception(f"Function '{func.__name__}' timed out after {seconds} seconds.")]
+
             def target():
                 try:
                     result[0] = func(*args, **kwargs)
@@ -41,6 +45,7 @@ def timeout(seconds):
         return wrapper
     return decorator
 
+
 class RobotController:
     @timeout(5)
     def wait_for_robot_running(self, poll_interval=2):
@@ -48,6 +53,7 @@ class RobotController:
             time.sleep(poll_interval)
             print('now: ', datetime.now())
             raise Exception(f"Function '{__name__}' timed out after {poll_interval} seconds.")
+
 
 def retry_request(retries=3, delay=1):
     def decorator(func):
