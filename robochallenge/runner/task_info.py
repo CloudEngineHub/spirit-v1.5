@@ -1,5 +1,4 @@
 TASK_INFO = {
-    # ARX5 的所有任务 ##################################################################################################################
     "open_the_drawer": {
         "task": "open the drawer",
         "rot_type": "euler",
@@ -99,8 +98,6 @@ TASK_INFO = {
         "observation.images.cam_left_wrist": "left_hand",
         "observation.images.cam_right_wrist": "high",
     },
-
-    # Aloha 的所有任务 ##################################################################################################################
     "stack_bowls": {
         "task": "stack the two smaller bowls on top of the largest bowl one by one.",
         "rot_type": "quat",
@@ -200,8 +197,6 @@ TASK_INFO = {
         "observation.images.cam_left_wrist": "left_hand",
         "observation.images.cam_right_wrist": "right_hand",
     },
-
-    # Franka 的所有任务 ##################################################################################################################
     "move_objects_into_box": {
         "task": "place all the clutter on the desk into the white box",
         "rot_type": "quat",
@@ -226,8 +221,6 @@ TASK_INFO = {
             "Reset the arm.",
         ]
     },
-
-    # UR5 的所有任务 ##################################################################################################################
     "arrange_fruits_in_basket": {
         "task": "Place the four fruits into the nearby basket one by one",
         "rot_type": "quat",
@@ -286,3 +279,5 @@ TASK_INFO = {
 
 # Tasks that should use a smaller chunk size by default
 TASKS_USE_LESS_CHUNK_SIZE = ["move_objects_into_box"]
+# Tasks that need apply gripper binarization
+TASTS_APPLY_GRIPPER_BINARIZATION = {"move_objects_into_box": 0.055}
