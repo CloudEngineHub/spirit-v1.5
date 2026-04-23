@@ -12,16 +12,29 @@ As of Jan 11, 2026, Spirit-v1.5 ranks **#1** on the [RoboChallenge](https://robo
 
 ## 📰 News
 * **[2026-01]** Initial Release: Technical blog, inference code, base model checkpoint, and a fine-tuned checkpoint are now available.
-* **[Coming Q1 2026]** We will release the fine-tuning code, instructions, and checkpoints for additional downstream tasks. Stay tuned!
+* **[2026-4]** Fine-tuning code released!
 
 ## Directory Structure
 
 ```text
-├── model/
+spirit-v1.5/
+├── model/                        # Model architecture
 │   ├── modeling_spirit_vla.py    # Main model architecture (Qwen3-VL backbone + DiT head + policy API)
-│   └── utils.py                  # Shared helpers (normalization, sampling, preprocessing)
 │
-├── robochallenge/
+├── dataset/                      # Dataset and data processing
+│   ├── dataset.py                # Dataset implementation
+│   └── transforms.py             # Data transformations
+│
+├── utils/                        # Utility functions
+│   ├── checkpoint.py             # Checkpoint loading/saving utilities
+│   ├── distributed.py            # Distributed training utilities
+│   ├── logger.py                 # Logging utilities
+│   ├── normalization.py          # Data normalization utilities
+│   ├── sampling.py               # Sampling strategies
+│   ├── tensor_ops.py             # Tensor operations
+│   └── vlm_utils.py              # Vision-Language Model utilities
+│
+├── robochallenge/                # RoboChallenge integration
 │   ├── run_robochallenge.py      # Python entrypoint
 │   ├── runner/
 │   │   ├── executor.py           # RoboChallengeExecutor (Checkpoint loading, inference, I/O)
@@ -34,30 +47,83 @@ As of Jan 11, 2026, Spirit-v1.5 ranks **#1** on the [RoboChallenge](https://robo
 │       ├── log.py                # Logging helpers
 │       └── util.py               # Misc utilities
 │
-└── scripts/
-    └── run_robochallenge.sh      # Minimal runtime launcher
+├── scripts/                      # Execution scripts
+│   ├── run_robochallenge.sh      # RoboChallenge runtime launcher
+│   └── run_finetune.sh           # Training launcher
+│
+├── train.py                      # Main training script
+├── requirements-base.txt         # Core dependencies (inference only)
+├── requirements-train.txt        # Additional training dependencies
+├── requirements.txt              # Complete dependencies (base + training)
+├── pyproject.toml                # Project configuration with optional dependencies
+└── README.md                     # This file
 ```
 
 ## Installation & Setup
 
-System Requirements:
-- Hardware: Tested on NVIDIA A100 80GB GPU.
-- Software: Python 3.11+.
+### System Requirements
+- **Hardware**: Tested on NVIDIA A100 80GB GPU.
+- **Software**: Python 3.10+.
 
-### uv (recommended)
+### Installation Options
 
+#### Option 1: uv (recommended)
+
+**For inference only:**
 ```bash
 uv sync
 source .venv/bin/activate
 ```
 
-### pip
+**For training:**
+```bash
+uv sync --extra train
+source .venv/bin/activate
+```
 
+#### Option 2: pip
+
+**For inference only:**
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-base.txt
 ```
+
+**For training:**
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-base.txt
+pip install -r requirements-train.txt
+```
+
+> **Note**: `flash-attn` requires matching CUDA and PyTorch versions. If installation fails, refer to the [flash-attn installation guide](https://github.com/Dao-AILab/flash-attention#installation-and-features).
+
+### Dependency Files
+- `requirements-base.txt` - Core dependencies for inference (backward compatible)
+- `requirements-train.txt` - Additional dependencies for training
+- `requirements.txt` - Complete dependencies (base + training)
+- `pyproject.toml` - Project configuration with optional `[train]` extra
+
+### Key Dependencies
+**Base (Inference):**
+- `torch==2.8.0` - PyTorch deep learning framework
+- `torchvision==0.23.0` - Computer vision utilities
+- `transformers==4.57.1` - Hugging Face transformers library
+- `diffusers==0.35.2` - Diffusion models library
+- `safetensors==0.5.3` - Safe tensor serialization
+- `numpy==2.2.6` - Numerical computing
+- `pillow==10.4.0` - Image processing
+- `requests==2.32.5` - HTTP library
+- `scipy==1.15.2` - Scientific computing
+
+**Training (Additional):**
+- `opencv-python>=4.8.0` - Image processing for data augmentation
+- `wandb>=0.16.0` - Experiment tracking and logging
+- `tqdm>=4.66.0` - Progress bars
+- `einops==0.8.1` - Tensor operations (required by flash-attn)
+- `flash-attn==2.8.3` - Flash Attention 2 for efficient training
 
 ## Model Checkpoints
 | Model | Type | Link |
@@ -96,6 +162,81 @@ export USED_CHUNK_SIZE=60
 
 ./scripts/run_robochallenge.sh
 ```
+
+## Finetune Guide
+
+### Prerequisites
+- Pretrained Spirit-v1.5 base model checkpoint
+- Training dataset (see [Dataset](#dataset) section below)
+- Multi-GPU setup (recommended: 8x A100 80GB)
+
+### Training Script
+
+The training script is located at `scripts/run_finetune.sh`. It uses PyTorch's `torchrun` for distributed training.
+
+### Environment Variables
+
+Set the following environment variables before training:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `DATA_ROOT` | Path to training dataset directory | Yes |
+| `PRETRAINED_PATH` | Path to pretrained model checkpoint (must contain `model.safetensors` and `config.json`) | Yes |
+| `OUTPUT_DIR` | Directory for saving checkpoints (default: `./outputs`) | No |
+| `NUM_GPUS` | Number of GPUs to use (default: 8) | No |
+| `BATCH_SIZE` | Training batch size per GPU (default: 32) | No |
+| `MAX_TRAIN_STEPS` | Maximum training steps (default: 40000) | No |
+| `LOG_INTERVAL` | Logging interval in steps (default: 25) | No |
+| `SAVE_STEPS` | Checkpoint saving interval (default: 2500) | No |
+| `NUM_WORKERS` | Number of data loading workers (default: 32) | No |
+| `PREFETCH_FACTOR` | Data prefetch factor (default: 8) | No |
+| `WANDB_MODE` | Weights & Biases logging mode (default: `disable`) | No |
+
+### Training Example
+
+```bash
+cd /path/to/spirit-v1.5
+
+# Set required environment variables
+export DATA_ROOT=/path/to/your/training/dataset
+export PRETRAINED_PATH=/path/to/pretrained/checkpoint
+export OUTPUT_DIR=./outputs/my_finetuned_model
+
+# Optional: Configure training parameters
+export NUM_GPUS=8
+export BATCH_SIZE=32
+export MAX_TRAIN_STEPS=40000
+export WANDB_MODE=online  # Enable W&B logging
+export WANDB_BASE_URL=https://api.wandb.ai
+export WANDB_API_KEY="my_wandb_api_key"
+
+# Run training
+./scripts/run_finetune.sh
+```
+
+### Training Output
+
+Training outputs will be saved to the `OUTPUT_DIR`:
+- **Checkpoints**: Saved every `SAVE_STEPS` steps
+- **W&B Logs**: If enabled, metrics are logged to Weights & Biases
+
+### Dataset
+
+Download the training dataset from Hugging Face:
+```bash
+huggingface-cli download RoboChallenge/task_table30_move_objects_into_box \
+  --repo-type dataset \
+  --local-dir /path/to/your/dataset
+```
+
+Set `DATA_ROOT` to the downloaded dataset directory when running training.
+
+### Distributed Training
+
+The training script uses PyTorch's Fully Sharded Data Parallel (FSDP) for efficient multi-GPU training:
+- Automatically shards model parameters across GPUs
+- Reduces memory footprint for large models
+- Supports gradient checkpointing for memory efficiency
 
 ## Intended Uses
 

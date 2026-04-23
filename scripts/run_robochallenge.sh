@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
+
 # Parameters (no defaults, except USED_CHUNK_SIZE)
 : "${TASK_NAME:?Please set TASK_NAME}"
 : "${ROBOCHALLENGE_JOB_ID:?Please set ROBOCHALLENGE_JOB_ID}"
@@ -20,6 +21,10 @@ if [[ ! -d "${CKPT_PATH}" ]]; then
 fi
 if [[ ! -f "${CKPT_PATH}/model.safetensors" ]]; then
   echo "[ERROR] model.safetensors not found in CKPT_PATH: ${CKPT_PATH}" >&2
+  exit 1
+fi
+if [[ ! -f "${CKPT_PATH}/config.json" ]]; then
+  echo "[ERROR] config.json not found in CKPT_PATH: ${CKPT_PATH}" >&2
   exit 1
 fi
 

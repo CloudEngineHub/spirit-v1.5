@@ -72,7 +72,7 @@ class InterfaceClient:
         self.robot_url = None
         self.clock_offset = None
         self.mock = False
-    
+
     def cal_clockoffset(self):
         offsets = []
         while True:

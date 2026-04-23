@@ -4,142 +4,21 @@
 # Released by Spirit AI Team.
 # ==============================================================================
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import Tensor
+from typing import Optional, Dict, Tuple
 
+SYSTEM_MESSAGE="You are a helpful assistant."
 
-class FeatureType(str, Enum):
-    STATE = "STATE"
-    VISUAL = "VISUAL"
-    ENV = "ENV"
-    ACTION = "ACTION"
-
-
-class NormalizationMode(str, Enum):
-    MIN_MAX = "MIN_MAX"
-    IDENTITY = "IDENTITY"
-
-
-@dataclass
-class PolicyFeature:
-    type: FeatureType
-    shape: Tuple
-
-
-def create_stats_buffers(
-    features: dict[str, PolicyFeature],
-    norm_map: dict[str, NormalizationMode],
-    stats: dict[str, dict[str, Tensor]] | None = None,
-) -> dict[str, dict[str, nn.ParameterDict]]:
-    stats_buffers = {}
-    for key, ft in features.items():
-        norm_mode = norm_map.get(ft.type, NormalizationMode.IDENTITY)
-        if norm_mode is NormalizationMode.IDENTITY:
-            continue
-        assert isinstance(norm_mode, NormalizationMode)
-        if norm_mode is not NormalizationMode.MIN_MAX:
-            raise ValueError(f"Unsupported normalization mode: {norm_mode}")
-        shape = tuple(ft.shape)
-        if ft.type is FeatureType.VISUAL:
-            assert len(shape) == 3, f"number of dimensions of {key} != 3 ({shape=}"
-            c, h, w = shape
-            assert c < h and c < w, f"{key} is not channel first ({shape=})"
-            shape = (c, 1, 1)
-        min_v = torch.ones(shape, dtype=torch.float32) * torch.inf
-        max_v = torch.ones(shape, dtype=torch.float32) * torch.inf
-        buffer = nn.ParameterDict(
-            {"min": nn.Parameter(min_v, requires_grad=False), "max": nn.Parameter(max_v, requires_grad=False)}
-        )
-        if stats is not None:
-            if key not in stats:
-                raise ValueError(f"Missing stats for feature `{key}` (expected `min`/`max`).")
-            if "min" not in stats[key] or "max" not in stats[key]:
-                raise ValueError(f"Stats for `{key}` must contain `min` and `max` for MIN_MAX normalization.")
-            min_src, max_src = stats[key]["min"], stats[key]["max"]
-            if isinstance(min_src, np.ndarray) and isinstance(max_src, np.ndarray):
-                buffer["min"].data = torch.from_numpy(min_src).to(dtype=torch.float32)
-                buffer["max"].data = torch.from_numpy(max_src).to(dtype=torch.float32)
-            elif isinstance(min_src, torch.Tensor) and isinstance(max_src, torch.Tensor):
-                buffer["min"].data = min_src.clone().to(dtype=torch.float32)
-                buffer["max"].data = max_src.clone().to(dtype=torch.float32)
-            else:
-                raise ValueError(f"Unexpected stats type for `{key}`: min={type(min_src)}, max={type(max_src)}")
-        stats_buffers[key] = buffer
-    return stats_buffers
-
-
-def no_stats_error_str(name: str) -> str:
-    return f"`{name}` is infinity. You should either initialize with `stats` as an argument, or use a pretrained model."
-
-
-def build_norm_state(
-    features: dict[str, PolicyFeature],
-    norm_map: dict[str, NormalizationMode],
-    stats: dict[str, dict[str, Tensor]] | None = None,
-) -> tuple[dict[FeatureType, NormalizationMode], dict[str, nn.ParameterDict]]:
-    norm_mode_map: dict[FeatureType, NormalizationMode] = {}
-    for k, v in (norm_map or {}).items():
-        ft = k if isinstance(k, FeatureType) else FeatureType(k)
-        mode = v if isinstance(v, NormalizationMode) else NormalizationMode(v)
-        if mode not in (NormalizationMode.IDENTITY, NormalizationMode.MIN_MAX):
-            raise ValueError(f"Unsupported normalization mode: {mode}")
-        norm_mode_map[ft] = mode
-    stats_buffers = create_stats_buffers(features, norm_mode_map, stats)
-    return norm_mode_map, stats_buffers
-
-
-def pad_vector(vector: torch.Tensor, new_dim: int) -> torch.Tensor:
-    if vector.shape[-1] == new_dim:
-        return vector
-    shape = list(vector.shape)
-    current_dim = shape[-1]
-    shape[-1] = new_dim
-    new_vector = torch.zeros(*shape, dtype=vector.dtype, device=vector.device)
-    new_vector[..., :current_dim] = vector
-    return new_vector
-
-
-def pad_and_cat(tensor_list: List[torch.Tensor]) -> torch.Tensor:
-    max_length = max(tensor.shape[2] for tensor in tensor_list)
-    padded_tensors = []
-    for tensor in tensor_list:
-        pad_length = max_length - tensor.shape[2]
-        padded_tensor = F.pad(tensor, (0, pad_length), "constant", 1)
-        padded_tensors.append(padded_tensor)
-    stacked_tensor = torch.cat(padded_tensors, dim=1)
-    return stacked_tensor
-
-
-def sample_beta(alpha: float, beta: float, bsize: int, device) -> torch.Tensor:
-    m = torch.distributions.beta.Beta(torch.tensor([alpha]), torch.tensor([beta]))
-    return m.sample((bsize,)).to(device).reshape((bsize,))
-
-
-def sample_noise(shape, device) -> torch.Tensor:
-    return torch.normal(mean=0.0, std=1.0, size=shape, dtype=torch.float32, device=device)
-
-
-def sample_time(bsize: int, device) -> torch.Tensor:
-    time_beta = sample_beta(1.5, 1.0, bsize, device)
-    time = time_beta * 0.999 + 0.001
-    return time.to(dtype=torch.float32, device=device)
-
+def get_user_prompt(image_placeholders, robot_type):
+    return f"{image_placeholders}\nThe current robot type is {robot_type}. What is the current task?"
 
 def preprocess_qwen_visual(
     sources,
     tokenizer,
-    grid_thw_image: Optional[List] = None,
+    grid_thw_image: Optional[list] = None,
 ) -> Dict:
     grid_thw_image = grid_thw_image or []
     roles = {"human": "user", "gpt": "assistant"}
-    system_message = "You are a helpful assistant."
     visual_replicate_index_image = 0
     input_ids = []
     for source in sources:
@@ -149,7 +28,7 @@ def preprocess_qwen_visual(
         except Exception:
             pass
         input_id = []
-        input_id += tokenizer.apply_chat_template([{"role": "system", "content": system_message}])
+        input_id += tokenizer.apply_chat_template([{"role": "system", "content": SYSTEM_MESSAGE}])
         for conv in source:
             try:
                 role = conv["role"]
@@ -184,18 +63,18 @@ def preprocess_qwen_visual(
 
 
 def get_rope_index_3(
-    spatial_merge_size: Optional[int] = 2,
+    spatial_merge_size: int = 2,
     input_ids: Optional[torch.LongTensor] = None,
     image_grid_thw: Optional[torch.LongTensor] = None,
     video_grid_thw: Optional[torch.LongTensor] = None,
     attention_mask: Optional[torch.Tensor] = None,
+    image_token_id: int = 151655,
+    video_token_id: int = 151656,
+    vision_start_token_id: int = 151652,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if video_grid_thw is not None:
         video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
         video_grid_thw[:, 0] = 1
-    image_token_id = 151655
-    video_token_id = 151656
-    vision_start_token_id = 151652
     mrope_position_deltas = []
     if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
         total_input_ids = input_ids

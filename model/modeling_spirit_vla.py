@@ -14,8 +14,7 @@ See the `LICENSE` for details.
 import json
 import os
 from dataclasses import dataclass, field, fields
-from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional, Dict
 
 import numpy as np
 import torch
@@ -26,15 +25,14 @@ from diffusers.models.attention import Attention, FeedForward
 from diffusers.models.embeddings import SinusoidalPositionalEmbedding, TimestepEmbedding, Timesteps
 from PIL import Image
 from safetensors.torch import load_file as safe_load_file
-from torch import Tensor, nn
+from torch import nn
 from transformers import (
-    AutoConfig,
     AutoProcessor,
     AutoTokenizer,
     PretrainedConfig,
-    PreTrainedModel,
 )
-from model.utils import (
+
+from utils import (
     FeatureType,
     NormalizationMode,
     PolicyFeature,
@@ -44,7 +42,9 @@ from model.utils import (
     pad_vector,
     preprocess_qwen_visual,
     sample_noise,
+    sample_time,
     no_stats_error_str,
+    get_user_prompt,
 )
 
 try:
@@ -68,14 +68,12 @@ ACTION = "action"
 # ----------------------------------------------------------------------------------------------------------------------
 
 
-
-
 class Normalize(nn.Module):
     def __init__(
         self,
-        features: dict[str, PolicyFeature],
-        norm_map: dict[str, NormalizationMode],
-        stats: dict[str, dict[str, Tensor]] | None = None,
+        features: Dict[str, PolicyFeature],
+        norm_map: Dict[str, NormalizationMode],
+        stats: Optional[Dict[str, dict[str, torch.Tensor]]] = None,
     ):
         super().__init__()
         self.features = features
@@ -84,7 +82,7 @@ class Normalize(nn.Module):
             setattr(self, "buffer_" + key.replace(".", "_"), buffer)
 
     @torch.no_grad()
-    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         batch = dict(batch)
         for key, ft in self.features.items():
             if key not in batch:
@@ -107,9 +105,9 @@ class Normalize(nn.Module):
 class Unnormalize(nn.Module):
     def __init__(
         self,
-        features: dict[str, PolicyFeature],
-        norm_map: dict[str, NormalizationMode],
-        stats: dict[str, dict[str, Tensor]] | None = None,
+        features: Dict[str, PolicyFeature],
+        norm_map: Dict[str, NormalizationMode],
+        stats: Optional[dict[str, dict[str, torch.Tensor]]] = None,
     ):
         super().__init__()
         self.features = features
@@ -118,7 +116,7 @@ class Unnormalize(nn.Module):
             setattr(self, "buffer_" + key.replace(".", "_"), buffer)
 
     @torch.no_grad()
-    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         batch = dict(batch)
         for key, ft in self.features.items():
             if key not in batch:
@@ -169,6 +167,9 @@ class SpiritVLAConfig:
     max_action_dim: int = 32
     proj_width: int = 1024
     num_steps: int = 10
+    action_dim: int = 14
+    action_horizon: int = 60
+    dit_dropout: float = 0.0
 
     def __post_init__(self):
         self.normalization_mapping = {
@@ -224,16 +225,17 @@ class BaseDiTConfig(PretrainedConfig):
         num_layers: int = 12,
         attention_bias: bool = True,
         activation_fn: str = "gelu-approximate",
-        num_embeds_ada_norm: Optional[int] = 1000,
+        num_embeds_ada_norm: int = 1000,
         upcast_attention: bool = False,
         norm_type: str = "ada_norm",
         norm_elementwise_affine: bool = False,
         norm_eps: float = 1e-5,
         max_num_positional_embeddings: int = 512,
         compute_dtype=torch.float32,
-        positional_embeddings: Optional[str] = "sinusoidal",
+        positional_embeddings: str  = "sinusoidal",
         interleave_self_attention=False,
         cross_attention_dim: Optional[int] = None,
+        dropout: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -254,6 +256,7 @@ class BaseDiTConfig(PretrainedConfig):
             "positional_embeddings": positional_embeddings,
             "interleave_self_attention": interleave_self_attention,
             "cross_attention_dim": cross_attention_dim,
+            "dropout": dropout,
         }
 
 
@@ -310,8 +313,8 @@ class BasicTransformerBlock(nn.Module):
         norm_elementwise_affine: bool = True,
         norm_type: str = "layer_norm",
         norm_eps: float = 1e-5,
-        positional_embeddings: Optional[str] = None,
-        num_positional_embeddings: Optional[int] = None,
+        positional_embeddings: Optional[str] =  None,
+        num_positional_embeddings:Optional[int] = None,
         ff_inner_dim: Optional[int] = None,
         ff_bias: bool = True,
         attention_out_bias: bool = True,
@@ -355,9 +358,11 @@ class BasicTransformerBlock(nn.Module):
             dim,
             dropout=dropout,
             activation_fn=activation_fn,
+            final_dropout=dropout,
             inner_dim=ff_inner_dim,
             bias=ff_bias,
         )
+        self.attn_final_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(
         self,
@@ -378,6 +383,7 @@ class BasicTransformerBlock(nn.Module):
             encoder_hidden_states=encoder_hidden_states,
             attention_mask=attention_mask,
         )
+        attn_output = self.attn_final_dropout(attn_output)
         hidden_states = attn_output + hidden_states
         if hidden_states.ndim == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -398,16 +404,17 @@ class BaseDiT(ModelMixin, ConfigMixin):
         num_layers: int = 12,
         attention_bias: bool = True,
         activation_fn: str = "gelu-approximate",
-        num_embeds_ada_norm: Optional[int] = 1000,
+        num_embeds_ada_norm: int = 1000,
         upcast_attention: bool = False,
         norm_type: str = "ada_norm",
         norm_elementwise_affine: bool = False,
         norm_eps: float = 1e-5,
         max_num_positional_embeddings: int = 512,
         compute_dtype=torch.float32,
-        positional_embeddings: Optional[str] = "sinusoidal",
+        positional_embeddings: str = "sinusoidal",
         interleave_self_attention=False,
         cross_attention_dim: Optional[int] = None,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.attention_head_dim = attention_head_dim
@@ -431,6 +438,7 @@ class BaseDiT(ModelMixin, ConfigMixin):
                     positional_embeddings=positional_embeddings,
                     num_positional_embeddings=self.config.max_num_positional_embeddings,
                     cross_attention_dim=curr_cross_attention_dim,
+                    dropout=self.config.dropout,
                 )
             ]
         self.transformer_blocks = nn.ModuleList(all_blocks)
@@ -477,12 +485,14 @@ class BaseDiT(ModelMixin, ConfigMixin):
 
 
 class SpiritVLAPolicy(nn.Module):
-    """High-level inference API.
+    """Spirit VLA policy model - main entry point for training and inference.
 
     Input:
     - `batch` is a dict containing images, `robot_type`, task string, and state/action tensors.
-    Output:
+    Inference Output:
     - unnormalized action trajectories (shape: B x T x action_dim).
+    Training Output:
+    - loss dict containing flow matching mse.
     """
 
     config_class = SpiritVLAConfig
@@ -518,6 +528,7 @@ class SpiritVLAPolicy(nn.Module):
             num_layers=config.dit_num_layers,
             interleave_self_attention=config.dit_interleave_self_attention,
             cross_attention_dim=config.dit_cross_attention_dim,
+            dropout=config.dit_dropout,
         )
         self.dit = BaseDiT(**dit_config.param_dict)
         self.num_vlm_last_embd = dit_config.num_vlm_last_embd
@@ -531,48 +542,50 @@ class SpiritVLAPolicy(nn.Module):
         self.state_proj = nn.Linear(self.config.max_state_dim, config.dit_hidden_size)
         self.action_in_proj = nn.Linear(self.config.max_action_dim, config.dit_hidden_size)
         self.action_out_proj = nn.Linear(config.dit_hidden_size, self.config.max_action_dim)
-
+        
         self.num_noise_per_sample = self.config.num_noise_per_sample
         self.vlm_hidden_size = vlm_hidden_size
         self.dit_hidden_size = config.dit_hidden_size
         self.config.proj_width = self.qwen.language_model.embed_tokens.embedding_dim
 
     # ----------------------------- Backbone helpers -----------------------------
-    def embed_image(self, image: torch.Tensor):
-        """
-        Encode images through Qwen3-VL vision tower and return (B, P, C) embeddings.
+    def _encode_vision(self, batch: dict) -> torch.Tensor:
+        device = batch[OBS_ROBOT].device
+        pixel_values_list, image_grid_thw_list, input_ids_list, position_ids_list = self.preprocess_rb_batch(batch)
 
-        Args:
-            image: tensor in [-1, 1], shape (B, C, H, W)
-        """
-        bz = image.shape[0]
-        device = image.device
-        preprocessed_img_list, image_grid_thw_list = [], []
-        for i in range(bz):
-            img_torch = (image[i] + 1.0) / 2.0
-            img_np = (img_torch.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-            img_pil = Image.fromarray(img_np)
-            processed_result = self.image_processor.preprocess(img_pil, return_tensors="pt")
-            preprocessed_img_list.append(processed_result["pixel_values"].to(device))
-            image_grid_thw_list.append(processed_result["image_grid_thw"].to(device))
-        used_img = torch.cat(preprocessed_img_list, dim=0)
-        used_img_grid = torch.cat(image_grid_thw_list, dim=0)
-        img_embedding = self.qwen.visual(used_img, grid_thw=used_img_grid)
-        if isinstance(img_embedding, tuple):
-            img_embedding = img_embedding[0]
-        mid_dim = img_embedding.shape[0] // bz
-        img_embedding = img_embedding.reshape(bz, mid_dim, -1)
-        return img_embedding
+        pixel_values = torch.cat(pixel_values_list, dim=0).to(device).contiguous()
+        image_grid_thw = torch.cat(image_grid_thw_list, dim=0).to(device).contiguous()
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids_list, batch_first=True,
+            padding_value=self.language_tokenizer.pad_token_id
+        ).to(device).contiguous()
+        model_max_length = self.language_tokenizer.model_max_length
+        input_ids = input_ids[:, :model_max_length]
+        position_ids = pad_and_cat(position_ids_list)[:, :, :model_max_length].to(device).contiguous()
+        attention_mask = input_ids.ne(self.language_tokenizer.pad_token_id).to(device)
+        
+        vlm_outputs = self.qwen.forward(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            image_grid_thw=image_grid_thw,
+            labels=None,
+            output_hidden_states=True,
+        )
 
-    def embed_language_tokens(self, tokens: torch.Tensor):
-        return self.qwen.get_input_embeddings()(tokens)
+        num_vlm_last_embd = min(self.num_vlm_last_embd, len(vlm_outputs.hidden_states))
+        vlm_last_embed = torch.cat(vlm_outputs.hidden_states[-num_vlm_last_embd:], dim=1)
+        return vlm_last_embed
 
     # ----------------------------- Flow matching core -----------------------------
-    def _embed_suffix(self, state, noisy_actions):
+    def _embed_suffix(self, state, noisy_actions, mask_state=True):
+        """Embed state and noisy actions. mask_state=False for training, True for inference."""
         embs = []
         pad_masks = []
         att_masks = []
-        state[:, :, [2, 9]] = 0
+        if mask_state:
+            state[:, :, [2, 9]] = 0
         state_emb = self.state_proj(state)
         embs.append(state_emb)
         bsize = state_emb.shape[0]
@@ -616,7 +629,7 @@ class SpiritVLAPolicy(nn.Module):
         state,
         vlm_last_embed,
         noise=None,
-    ) -> Tensor:
+    ) -> torch.Tensor:
         bsize = state.shape[0]
         device = state.device
         if noise is None:
@@ -694,7 +707,7 @@ class SpiritVLAPolicy(nn.Module):
             task = batch["task"][i]
             image_placeholders = " ".join(["<image>"] * num_images)
             robot_type = batch["robot_type"][i]
-            user_prompt = f"{image_placeholders}\nThe current robot type is {robot_type}. What is the current task?"
+            user_prompt = get_user_prompt(image_placeholders, robot_type)
             input_id_dict = preprocess_qwen_visual(
                 [
                     [
@@ -721,40 +734,94 @@ class SpiritVLAPolicy(nn.Module):
             state = state[:, None, :]
         state = pad_vector(state, self.config.max_state_dim)
         return state
+    
+    def prepare_actions(self, batch):
+        actions = batch[ACTION]
+        actions = pad_vector(actions, self.config.max_action_dim)
+        action_mask = pad_vector(
+            batch["action_mask"].float(), self.config.max_action_dim
+        ).bool()
+        return actions, action_mask
+
+    # ----------------------------- Training -----------------------------
+    def forward(self, batch: dict) -> tuple[torch.Tensor, dict]:
+        return self.compute_loss(batch)
+
+    def compute_loss(self, batch: dict) -> tuple[torch.Tensor, dict]:
+        """model training
+
+        Args:
+            batch: {
+                "observation.images.cam_high": [B, 3, H, W],
+                "observation.images.cam_left_wrist": [B, 3, H, W],
+                "observation.images.cam_right_wrist": [B, 3, H, W],
+                "observation.state": [B, 1, action_dim] or [B, action_dim],
+                "action": [B, action_horizon, action_dim],
+                "action_mask": [B, action_horizon, action_dim],  # bool
+                "action_is_pad": [B, action_horizon],            # bool
+                "task": List[str],
+                "robot_type": List[str],
+            }
+
+        Returns:
+            loss: float
+            log_dict: {"loss/flow_mse": float, "loss/total": float}
+        """
+        device = batch[OBS_ROBOT].device
+        batch = self.normalize_inputs(batch)
+        batch = self.normalize_targets(batch)
+
+        state = self.prepare_state(batch)
+        actions, action_mask = self.prepare_actions(batch)
+
+        vlm_last_embed = self._encode_vision(batch)
+        vlm_last_embed = self.proj_vlm_output(vlm_last_embed)
+
+        bsize = actions.shape[0]
+        noise = sample_noise(actions.shape, device)
+        t = sample_time(bsize, device)
+        t_expand = t.view(-1, 1, 1)
+        noisy_actions = actions + t_expand * (noise - actions)
+
+        suffix_embs, _, _ = self._embed_suffix(state, noisy_actions, mask_state=False)
+
+        v_t = self.dit(
+            hidden_states=suffix_embs,
+            encoder_hidden_states=vlm_last_embed,
+            timestep=t,
+        )
+        v_t = v_t[:, -self.config.n_action_steps:, :]
+        v_t = v_t.to(dtype=torch.float32)
+        v_t = self.action_out_proj(v_t)
+        u_t = noise - actions
+        flow_mse = F.mse_loss(v_t, u_t, reduction="none")
+
+        if "action_is_pad" in batch:
+            in_episode = (~batch["action_is_pad"]).float()
+            flow_mse = flow_mse * in_episode.unsqueeze(-1)
+
+        valid_mask = action_mask.float()
+        num_valid = valid_mask.sum().clamp_min(1.0)
+        loss = (flow_mse * valid_mask).sum() / num_valid
+
+        log_dict = {
+            "loss/flow_mse": loss.item(),
+            "loss/total": loss.item(),
+        }
+        return loss, log_dict
 
     # ----------------------------- Inference -----------------------------
     def select_action(
         self,
-        batch: dict[str, Tensor],
-        noise: Tensor | None = None,
-    ) -> Tensor:
+        batch: Dict[str, torch.Tensor],
+        noise: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         self.eval()
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
         state = self.prepare_state(batch)
-        device = state.device
-        pixel_values_list, image_grid_thw_list, input_ids_list, position_ids_list = self.preprocess_rb_batch(batch)
-        pixel_values = torch.cat(pixel_values_list, dim=0).to(device).contiguous()
-        image_grid_thw = torch.cat(image_grid_thw_list, dim=0).to(device).contiguous()
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids_list, batch_first=True, padding_value=self.language_tokenizer.pad_token_id
-        ).to(device).contiguous()
-        model_max_length = self.language_tokenizer.model_max_length
-        input_ids = input_ids[:, :model_max_length]
-        position_ids = pad_and_cat(position_ids_list)[:, :, :model_max_length].to(device).contiguous()
-        attention_mask = input_ids.ne(self.language_tokenizer.pad_token_id).to(device)
-        vlm_outputs = self.qwen.forward(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            image_grid_thw=image_grid_thw,
-            labels=None,
-            output_hidden_states=True,
-        )
-        num_vlm_last_embd = self.num_vlm_last_embd
-        num_vlm_last_embd = min(num_vlm_last_embd, len(vlm_outputs.hidden_states))
-        vlm_last_embed = torch.cat(vlm_outputs.hidden_states[-num_vlm_last_embd:], dim=1)
+
+        vlm_last_embed = self._encode_vision(batch)
         actions = self._sample_actions_unified(
             state,
             vlm_last_embed,
@@ -769,7 +836,7 @@ class SpiritVLAPolicy(nn.Module):
     # Checkpoint loading
     # ------------------------------------------------------------------------------------------------------------------
     @classmethod
-    def from_pretrained(cls, ckpt_path: str, strict: bool = True):
+    def from_pretrained(cls, ckpt_path: str, strict: bool = True, train: bool = False):
         config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
@@ -789,11 +856,23 @@ class SpiritVLAPolicy(nn.Module):
             raise FileNotFoundError(f"model.safetensors not found in {ckpt_path}")
         # If user requests CUDA and it's available, load weights directly on GPU to avoid an extra copy.
         load_device = "cpu"
-        try:
-            if isinstance(config.device, str) and config.device.startswith("cuda") and torch.cuda.is_available():
-                load_device = config.device
-        except Exception:
-            load_device = "cpu"
+        if not train:
+            try:
+                if isinstance(config.device, str) and config.device.startswith("cuda") and torch.cuda.is_available():
+                    load_device = config.device
+            except Exception:
+                load_device = "cpu"
+        # Auto-enable FA2 if available for better memory efficiency and training speed
+        if train:
+            try:
+                from flash_attn import flash_attn_func
+                if config.attention_implementation == "eager":
+                    print("FA2 is available, enabling FA2 automatically")
+                config.attention_implementation = "flash_attention_2"
+            except ImportError:
+                if "flash_attention" in config.attention_implementation:
+                    raise RuntimeError("[ERROR]: Current environment does not support Flash_Attention; please check the config.json configuration!")
+        
         state_dict = safe_load_file(weight_path, device=load_device)
         model.load_state_dict(state_dict, strict=strict)
         return model
