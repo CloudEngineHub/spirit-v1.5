@@ -4,15 +4,15 @@ import os
 import pickle
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 from torchvision.utils import save_image
+from typing import Optional
 
 from model.modeling_spirit_vla import SpiritVLAPolicy
-from .task_info import TASK_INFO, TASKS_USE_LESS_CHUNK_SIZE
+from .task_info import TASK_INFO, TASKS_USE_LESS_CHUNK_SIZE, TASTS_APPLY_GRIPPER_BINARIZATION
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def _img_byte_to_tensor(img_byte, target_size_for_PIL=(320, 240)):
     return torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
 
 
-def _post_process_action(action_np, state_np, robot_type, used_chunk_size, raw_embodiment_stats):
+def _post_process_action(action_np, state_np, robot_type, used_chunk_size, raw_embodiment_stats, binarization_threshold: Optional[float] = None):
     result_list = []
     if raw_embodiment_stats is not None:
         left_gripper_min, left_gripper_max = (
@@ -101,6 +101,11 @@ def _post_process_action(action_np, state_np, robot_type, used_chunk_size, raw_e
         else:
             raise ValueError(f"Unsupported robot type: {robot_type}")
 
+        if binarization_threshold is not None:
+            if list_i[7] < binarization_threshold:
+                list_i[7] = 0.0
+            if len(list_i) == 16 and list_i[15] < binarization_threshold:
+                list_i[15] = 0.0
         result_list.append(list_i)
 
     return result_list
@@ -209,6 +214,7 @@ class RoboChallengeExecutor:
         if task_name in TASKS_USE_LESS_CHUNK_SIZE:
             used_chunk_size = 40
             logger.info("Task %s uses smaller chunk size: %s", task_name, used_chunk_size)
+        binarization_threshold = TASTS_APPLY_GRIPPER_BINARIZATION.get(task_name)
         ckpt_path = cfg.ckpt_path
         self.policy = SpiritVLAPolicy.from_pretrained(ckpt_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -217,6 +223,7 @@ class RoboChallengeExecutor:
         self.task_name = task_name
         self.run_id = run_id
         self.used_chunk_size = used_chunk_size
+        self.binarization_threshold = binarization_threshold
 
         raw_stats_path = getattr(cfg, "raw_embodiment_stats_json_path", None)
         self.raw_embodiment_stats = None
@@ -284,6 +291,7 @@ class RoboChallengeExecutor:
             TASK_INFO[self.task_name]["robot_type"],
             self.used_chunk_size,
             self.raw_embodiment_stats,
+            self.binarization_threshold,
         )
 
         item_tmp["our_infer_action"] = action_list

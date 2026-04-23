@@ -1,8 +1,6 @@
-# Spirit-v1.5 Complete Dependencies
-# For training and inference
+# Spirit-v1.5 Base Dependencies (Inference Only)
 # Compatible with Python 3.10+
 
-# Base dependencies (inference)
 torch==2.8.0
 torchvision==0.23.0
 transformers==4.57.1
@@ -12,8 +10,3 @@ numpy==2.2.6
 pillow==10.4.0
 requests==2.32.5
 scipy==1.15.2
-
-# Training dependencies
-opencv-python>=4.8.0
-wandb>=0.16.0
-tqdm>=4.66.0
