@@ -613,7 +613,7 @@ class SpiritVLAPolicy(nn.Module):
         x_t,
         timestep,
     ):
-        suffix_embs, _, _ = self._embed_suffix(state, x_t)
+        suffix_embs, _, _ = self._embed_suffix(state, x_t, mask_state=False)
         suffix_out = self.dit(
             hidden_states=suffix_embs,
             encoder_hidden_states=vlm_last_embed,

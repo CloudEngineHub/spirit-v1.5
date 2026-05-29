@@ -32,8 +32,8 @@ torchrun --nproc_per_node=${NUM_GPUS:-8} \
     --pretrained_path "${PRETRAINED_PATH:?PRETRAINED_PATH must be set}" \
     --output_dir "${OUTPUT_DIR:-${REPO_ROOT}/outputs}" \
     --batch_size "${BATCH_SIZE:-32}" \
-    --max_train_steps "${MAX_TRAIN_STEPS:-5}" \
-    --log_interval "${LOG_INTERVAL:-1}" \
+    --max_train_steps "${MAX_TRAIN_STEPS:-60000}" \
+    --log_interval "${LOG_INTERVAL:-25}" \
     --save_steps "${SAVE_STEPS:-2500}" \
     --num_workers "${NUM_WORKERS:-32}" \
     --prefetch_factor "${PREFETCH_FACTOR:-8}" \
